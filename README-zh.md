@@ -2,6 +2,8 @@
 
 [English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
 
+> **Fork 說明**：本倉庫是 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 的 **Azure OpenAI 版本**。原專案使用 OpenAI 相容 API，本 fork 改為使用 Azure OpenAI 端點。
+
 ## 模型就是 Agent
 
 在讨论代码之前，先把一件事彻底说清楚。

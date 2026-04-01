@@ -2,6 +2,8 @@
 
 [English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
 
+> **Fork について**：このリポジトリは [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) の **Azure OpenAI 版**です。オリジナルは OpenAI 互換 API を使用していますが、本 fork は Azure OpenAI エンドポイントに対応しています。
+
 ## モデルこそが Agent である
 
 コードの話をする前に、一つだけ明確にしておく。

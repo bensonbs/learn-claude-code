@@ -1,4 +1,7 @@
 [English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
+
+> **Fork Notice**: This is an **Azure OpenAI** fork of [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code). The original project uses OpenAI-compatible APIs; this fork adapts it to work with Azure OpenAI endpoints.
+
 # Learn Claude Code -- Harness Engineering for Real Agents
 
 ## The Model IS the Agent
