@@ -27,17 +27,18 @@ import os
 import subprocess
 from pathlib import Path
 
-from anthropic import Anthropic
+from openai import AzureOpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    api_key=os.environ["AZURE_OPENAI_API_KEY"],
+    api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+)
+MODEL = os.environ["AZURE_OPENAI_DEPLOYMENT"]
 TASKS_DIR = WORKDIR / ".tasks"
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use task tools to plan and track work."
@@ -182,46 +183,45 @@ TOOL_HANDLERS = {
 }
 
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "task_create", "description": "Create a new task.",
-     "input_schema": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}}, "required": ["subject"]}},
-    {"name": "task_update", "description": "Update a task's status or dependencies.",
-     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}, "addBlockedBy": {"type": "array", "items": {"type": "integer"}}, "removeBlockedBy": {"type": "array", "items": {"type": "integer"}}}, "required": ["task_id"]}},
-    {"name": "task_list", "description": "List all tasks with status summary.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "task_get", "description": "Get full details of a task by ID.",
-     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}},
+    {"type": "function", "function": {"name": "bash", "description": "Run a shell command.",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read file contents.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Write content to file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
+    {"type": "function", "function": {"name": "task_create", "description": "Create a new task.",
+     "parameters": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}}, "required": ["subject"]}}},
+    {"type": "function", "function": {"name": "task_update", "description": "Update a task's status or dependencies.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}, "addBlockedBy": {"type": "array", "items": {"type": "integer"}}, "removeBlockedBy": {"type": "array", "items": {"type": "integer"}}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "task_list", "description": "List all tasks with status summary.",
+     "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "task_get", "description": "Get full details of a task by ID.",
+     "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}}},
 ]
 
 
 def agent_loop(messages: list):
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL, messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS, max_completion_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        msg = response.choices[0].message
+        messages.append(msg)
+        if not msg.tool_calls:
             return
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}:")
-                print(str(output)[:200])
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-        messages.append({"role": "user", "content": results})
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments)
+            handler = TOOL_HANDLERS.get(tc.function.name)
+            try:
+                output = handler(**args) if handler else f"Unknown tool: {tc.function.name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {tc.function.name}:")
+            print(str(output)[:200])
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
 
 
 if __name__ == "__main__":
@@ -235,9 +235,9 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        last = history[-1]
+        if hasattr(last, "content") and last.content:
+            print(last.content)
+        elif isinstance(last, dict) and last.get("content"):
+            print(last["content"])
         print()

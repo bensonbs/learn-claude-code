@@ -27,21 +27,23 @@ forces it to keep updating when it forgets.
 Key insight: "The agent can track its own progress -- and I can see it."
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
 
-from anthropic import Anthropic
+from openai import AzureOpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    api_key=os.environ["AZURE_OPENAI_API_KEY"],
+    api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+)
+MODEL = os.environ["AZURE_OPENAI_DEPLOYMENT"]
 
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
 Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
@@ -147,16 +149,16 @@ TOOL_HANDLERS = {
 }
 
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "todo", "description": "Update task list. Track progress on multi-step tasks.",
-     "input_schema": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["id", "text", "status"]}}}, "required": ["items"]}},
+    {"type": "function", "function": {"name": "bash", "description": "Run a shell command.",
+     "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "read_file", "description": "Read file contents.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "write_file", "description": "Write content to file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in file.",
+     "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}}},
+    {"type": "function", "function": {"name": "todo", "description": "Update task list. Track progress on multi-step tasks.",
+     "parameters": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["id", "text", "status"]}}}, "required": ["items"]}}},
 ]
 
 
@@ -165,31 +167,30 @@ def agent_loop(messages: list):
     rounds_since_todo = 0
     while True:
         # Nag reminder is injected below, alongside tool results
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL, messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS, max_completion_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        msg = response.choices[0].message
+        messages.append(msg)
+        if not msg.tool_calls:
             return
-        results = []
         used_todo = False
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}:")
-                print(str(output)[:200])
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-                if block.name == "todo":
-                    used_todo = True
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments)
+            handler = TOOL_HANDLERS.get(tc.function.name)
+            try:
+                output = handler(**args) if handler else f"Unknown tool: {tc.function.name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {tc.function.name}:")
+            print(str(output)[:200])
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(output)})
+            if tc.function.name == "todo":
+                used_todo = True
         rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
         if rounds_since_todo >= 3:
-            results.append({"type": "text", "text": "<reminder>Update your todos.</reminder>"})
-        messages.append({"role": "user", "content": results})
+            messages.append({"role": "user", "content": "<reminder>Update your todos.</reminder>"})
 
 
 if __name__ == "__main__":
@@ -203,9 +204,8 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        last = history[-1]
+        content = last.content if hasattr(last, "content") else last.get("content")
+        if content and isinstance(content, str):
+            print(content)
         print()

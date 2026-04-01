@@ -34,30 +34,33 @@ try:
     readline.parse_and_bind('set input-meta on')
     readline.parse_and_bind('set output-meta on')
     readline.parse_and_bind('set convert-meta off')
-    readline.parse_and_bind('set enable-meta-keybindings on')
 except ImportError:
     pass
 
-from anthropic import Anthropic
+from openai import AzureOpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    api_key=os.environ["AZURE_OPENAI_API_KEY"],
+    api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+)
+MODEL = os.environ["AZURE_OPENAI_DEPLOYMENT"]
 
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 TOOLS = [{
-    "name": "bash",
-    "description": "Run a shell command.",
-    "input_schema": {
-        "type": "object",
-        "properties": {"command": {"type": "string"}},
-        "required": ["command"],
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
     },
 }]
 
@@ -78,25 +81,26 @@ def run_bash(command: str) -> str:
 # -- The core pattern: a while loop that calls tools until the model stops --
 def agent_loop(messages: list):
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS, max_completion_tokens=8000,
         )
+        msg = response.choices[0].message
         # Append assistant turn
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append(msg)
         # If the model didn't call a tool, we're done
-        if response.stop_reason != "tool_use":
+        if not msg.tool_calls:
             return
         # Execute each tool call, collect results
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                print(f"\033[33m$ {block.input['command']}\033[0m")
-                output = run_bash(block.input["command"])
-                print(output[:200])
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": output})
-        messages.append({"role": "user", "content": results})
+        import json
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments)
+            print(f"\033[33m$ {args['command']}\033[0m")
+            output = run_bash(args["command"])
+            print(output[:200])
+            messages.append({"role": "tool", "tool_call_id": tc.id,
+                             "content": output})
 
 
 if __name__ == "__main__":
@@ -110,9 +114,8 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        last = history[-1]
+        text = last.content if hasattr(last, "content") else last.get("content")
+        if text:
+            print(text)
         print()
